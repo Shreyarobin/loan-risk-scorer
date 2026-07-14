@@ -3,11 +3,16 @@ from pydantic import BaseModel
 import joblib
 import json
 import pandas as pd
+import numpy as np
 
 app = FastAPI(title="Loan Risk Scorer")
 
 # Load the model and schema once, when the server starts
 model = joblib.load("../../models/risk_model.pkl")
+shap_explainer = joblib.load("../../models/shap_explainer.pkl")
+
+with open("../../models/fairness_report.json") as f:
+    fairness_report = json.load(f)
 
 with open("../../models/feature_schema.json") as f:
     schema = json.load(f)
@@ -45,14 +50,8 @@ def root():
 
 @app.post("/score")
 def score_applicant(applicant: ApplicantRaw):
-    # Turn the single applicant into a one-row dataframe
     raw_df = pd.DataFrame([applicant.model_dump()])
-
-    # One-hot encode it the same way training data was encoded
     encoded = pd.get_dummies(raw_df)
-
-    # Make sure it has exactly the same columns as training data,
-    # in the same order — fill missing ones with 0
     encoded = encoded.reindex(columns=expected_columns, fill_value=0)
 
     probability = model.predict_proba(encoded)[0][1]
@@ -61,3 +60,33 @@ def score_applicant(applicant: ApplicantRaw):
         "risk_probability": round(float(probability), 4),
         "risk_label": "high_risk" if probability >= 0.5 else "low_risk"
     }
+
+
+@app.post("/score/explanation")
+def explain_applicant(applicant: ApplicantRaw):
+    raw_df = pd.DataFrame([applicant.model_dump()])
+    encoded = pd.get_dummies(raw_df)
+    encoded = encoded.reindex(columns=expected_columns, fill_value=0)
+
+    probability = model.predict_proba(encoded)[0][1]
+    shap_values = shap_explainer.shap_values(encoded)
+
+    explanation = sorted(
+        [
+            {"feature": col, "value": encoded.iloc[0][col].item(), "shap_value": round(float(val), 4)}
+            for col, val in zip(encoded.columns, shap_values[0])
+        ],
+        key=lambda x: abs(x["shap_value"]),
+        reverse=True
+    )[:10]
+
+    return {
+        "risk_probability": round(float(probability), 4),
+        "risk_label": "high_risk" if probability >= 0.5 else "low_risk",
+        "top_factors": explanation
+    }
+
+
+@app.get("/fairness-report")
+def get_fairness_report():
+    return fairness_report
