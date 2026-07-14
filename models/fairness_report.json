@@ -1,0 +1,27 @@
+{
+  "audited_attribute": "age_group",
+  "group_stats": {
+    "count": {
+      "25_to_60": 806,
+      "over_60": 45,
+      "under_25": 149
+    },
+    "avg_predicted_risk": {
+      "25_to_60": 0.2905820189937649,
+      "over_60": 0.2798467282967047,
+      "under_25": 0.3973526447173833
+    },
+    "pct_flagged_high_risk": {
+      "25_to_60": 0.2196029776674938,
+      "over_60": 0.2,
+      "under_25": 0.3221476510067114
+    }
+  },
+  "disparate_impact_ratio": {
+    "25_to_60": 0.9754962779156326,
+    "over_60": 1.0,
+    "under_25": 0.8473154362416108
+  },
+  "threshold_used": 0.8,
+  "note": "under_25 group shows disparate impact ratio ~0.85, above threshold but weakest-treated group; small sample size (n=149)"
+}
