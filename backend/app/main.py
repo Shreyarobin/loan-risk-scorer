@@ -4,12 +4,14 @@ import joblib
 import json
 import pandas as pd
 import numpy as np
-from transformers import pipeline, AutoTokenizer, AutoModelForTokenClassification
+import torch
+from transformers import pipeline, AutoTokenizer, AutoModelForTokenClassification, AutoModelForCausalLM
 from sentence_transformers import SentenceTransformer
 import psycopg2
 from groq import Groq
 import os
 from dotenv import load_dotenv
+from peft import PeftModel
 
 load_dotenv()
 
@@ -42,6 +44,17 @@ embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
 
 # Groq client for answer generation
 groq_client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
+
+# Load the fine-tuned explanation narrator (QLoRA adapter on Qwen2.5-3B)
+print("Loading base model for explanation narrator (this takes a minute)...")
+narrator_tokenizer = AutoTokenizer.from_pretrained("../../models/explanation_adapter")
+narrator_base_model = AutoModelForCausalLM.from_pretrained(
+    "Qwen/Qwen2.5-3B-Instruct",
+    torch_dtype=torch.float32,
+    device_map="cpu"
+)
+narrator_model = PeftModel.from_pretrained(narrator_base_model, "../../models/explanation_adapter")
+print("Narrator model loaded.")
 
 
 def get_db_connection():
@@ -91,6 +104,47 @@ Answer:"""
     )
     return response.choices[0].message.content
 
+
+def generate_narrative(top_factors: list, decision: str) -> str:
+    instruction = "You are a compliance assistant. Given the loan decision and top contributing factors below, write a clear, professional explanation for the applicant."
+
+    shap_input = {
+        "decision": decision,
+        "top_factors": [
+            {"feature": f["feature"], "description": f"{'higher' if f['shap_value'] > 0 else 'lower'} {f['feature'].replace('_', ' ')}"}
+            for f in top_factors[:3]
+        ]
+    }
+    input_text = json.dumps(shap_input, indent=2)
+
+    prompt = f"""### Instruction:
+{instruction}
+
+### Input:
+{input_text}
+
+### Response:
+"""
+
+    inputs = narrator_tokenizer(prompt, return_tensors="pt")
+    outputs = narrator_model.generate(
+        **inputs,
+        max_new_tokens=80,
+        temperature=0.3,
+        do_sample=True,
+        pad_token_id=narrator_tokenizer.eos_token_id,
+        eos_token_id=narrator_tokenizer.eos_token_id,
+        repetition_penalty=1.3
+    )
+    generated_text = narrator_tokenizer.decode(outputs[0], skip_special_tokens=True)
+    response = generated_text.split("### Response:")[-1].strip()
+
+    # cut off anything after the model starts echoing prompt structure back
+    # (any '#' sequence is always template leakage, never legitimate explanation text)
+    if "#" in response:
+        response = response.split("#")[0].strip()
+
+    return response
 
 class ApplicantRaw(BaseModel):
     checking_status: str
@@ -164,6 +218,35 @@ def explain_applicant(applicant: ApplicantRaw):
         "risk_probability": round(float(probability), 4),
         "risk_label": "high_risk" if probability >= 0.5 else "low_risk",
         "top_factors": explanation
+    }
+
+
+@app.post("/score/narrative")
+def narrative_explanation(applicant: ApplicantRaw):
+    raw_df = pd.DataFrame([applicant.model_dump()])
+    encoded = pd.get_dummies(raw_df)
+    encoded = encoded.reindex(columns=expected_columns, fill_value=0)
+
+    probability = model.predict_proba(encoded)[0][1]
+    risk_label = "high_risk" if probability >= 0.5 else "low_risk"
+    decision = "denied" if risk_label == "high_risk" else "approved"
+
+    shap_values = shap_explainer.shap_values(encoded)
+    top_factors = sorted(
+        [
+            {"feature": col, "shap_value": round(float(val), 4)}
+            for col, val in zip(encoded.columns, shap_values[0])
+        ],
+        key=lambda x: abs(x["shap_value"]),
+        reverse=True
+    )[:5]
+
+    narrative = generate_narrative(top_factors, decision)
+
+    return {
+        "risk_probability": round(float(probability), 4),
+        "risk_label": risk_label,
+        "narrative_explanation": narrative
     }
 
 
