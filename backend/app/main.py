@@ -12,6 +12,7 @@ from groq import Groq
 import os
 from dotenv import load_dotenv
 from peft import PeftModel
+from agent import build_agent_graph
 
 load_dotenv()
 
@@ -55,6 +56,9 @@ narrator_base_model = AutoModelForCausalLM.from_pretrained(
 )
 narrator_model = PeftModel.from_pretrained(narrator_base_model, "../../models/explanation_adapter")
 print("Narrator model loaded.")
+
+# Build the LangGraph agent (orchestrates score -> explain -> policy -> memo -> approval gate)
+loan_agent = build_agent_graph()
 
 
 def get_db_connection():
@@ -145,6 +149,7 @@ def generate_narrative(top_factors: list, decision: str) -> str:
         response = response.split("#")[0].strip()
 
     return response
+
 
 class ApplicantRaw(BaseModel):
     checking_status: str
@@ -296,4 +301,16 @@ def ask_policy_assistant(query: PolicyQuestion):
         "question": query.question,
         "answer": answer,
         "retrieved_chunks": retrieved_chunks
+    }
+
+
+@app.post("/applications/analyze")
+def analyze_application(applicant: ApplicantRaw):
+    result = loan_agent.invoke({"applicant_data": applicant.model_dump()})
+
+    return {
+        "risk_probability": result["risk_probability"],
+        "risk_label": result["risk_label"],
+        "memo": result["memo"],
+        "approval_status": result["approval_status"]
     }
