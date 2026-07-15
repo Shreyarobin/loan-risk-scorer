@@ -1,4 +1,5 @@
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import joblib
 import json
@@ -17,6 +18,14 @@ from agent import build_agent_graph
 load_dotenv()
 
 app = FastAPI(title="Loan Risk Scorer")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # Load the model and schema once, when the server starts
 model = joblib.load("../../models/risk_model.pkl")
