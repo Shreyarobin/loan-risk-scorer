@@ -5,6 +5,8 @@ import json
 import pandas as pd
 import numpy as np
 from transformers import pipeline, AutoTokenizer, AutoModelForTokenClassification
+from sentence_transformers import SentenceTransformer
+import psycopg2
 
 app = FastAPI(title="Loan Risk Scorer")
 
@@ -29,6 +31,19 @@ document_ner = pipeline(
     tokenizer=ner_tokenizer,
     aggregation_strategy="max"
 )
+
+# Load the embedding model for the RAG policy assistant
+embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
+
+
+def get_db_connection():
+    return psycopg2.connect(
+        host="localhost",
+        port=5432,
+        dbname="pms_platform",
+        user="pms_admin",
+        password="localdevpassword"
+    )
 
 
 def clean_entities(results, text, min_confidence=0.6):
@@ -74,6 +89,10 @@ class ApplicantRaw(BaseModel):
 
 class DocumentText(BaseModel):
     text: str
+
+
+class PolicyQuestion(BaseModel):
+    question: str
 
 
 @app.get("/")
@@ -133,4 +152,32 @@ def extract_document_fields(document: DocumentText):
     return {
         "original_text": document.text,
         "extracted_fields": extracted
+    }
+
+
+@app.post("/policy-assistant/ask")
+def ask_policy_assistant(query: PolicyQuestion):
+    query_embedding = embedding_model.encode(query.question).tolist()
+
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT source, chunk_text, embedding <-> %s::vector AS distance
+        FROM loan_risk_policy_chunks
+        ORDER BY distance
+        LIMIT 3;
+        """,
+        (query_embedding,)
+    )
+    results = cur.fetchall()
+    cur.close()
+    conn.close()
+
+    return {
+        "question": query.question,
+        "retrieved_chunks": [
+            {"source": source, "text": chunk, "relevance_distance": round(float(distance), 4)}
+            for source, chunk, distance in results
+        ]
     }
