@@ -7,6 +7,11 @@ import numpy as np
 from transformers import pipeline, AutoTokenizer, AutoModelForTokenClassification
 from sentence_transformers import SentenceTransformer
 import psycopg2
+from groq import Groq
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
 
 app = FastAPI(title="Loan Risk Scorer")
 
@@ -35,6 +40,9 @@ document_ner = pipeline(
 # Load the embedding model for the RAG policy assistant
 embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
 
+# Groq client for answer generation
+groq_client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
+
 
 def get_db_connection():
     return psycopg2.connect(
@@ -62,6 +70,26 @@ def clean_entities(results, text, min_confidence=0.6):
             merged.append(dict(r))
 
     return [{"type": m["entity_group"], "value": m["word"].strip(" .,")} for m in merged]
+
+
+def generate_answer(question: str, chunks: list[str]) -> str:
+    context = "\n\n---\n\n".join(chunks)
+    prompt = f"""You are a compliance assistant for a loan origination platform. Answer the question using ONLY the policy context below. If the context doesn't fully answer the question, say so clearly. Keep the answer concise and cite which part of the context supports your answer.
+
+Policy context:
+{context}
+
+Question: {question}
+
+Answer:"""
+
+    response = groq_client.chat.completions.create(
+        model="llama-3.1-8b-instant",
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.2,
+        max_tokens=400
+    )
+    return response.choices[0].message.content
 
 
 class ApplicantRaw(BaseModel):
@@ -174,10 +202,15 @@ def ask_policy_assistant(query: PolicyQuestion):
     cur.close()
     conn.close()
 
+    retrieved_chunks = [
+        {"source": source, "text": chunk, "relevance_distance": round(float(distance), 4)}
+        for source, chunk, distance in results
+    ]
+
+    answer = generate_answer(query.question, [c["text"] for c in retrieved_chunks])
+
     return {
         "question": query.question,
-        "retrieved_chunks": [
-            {"source": source, "text": chunk, "relevance_distance": round(float(distance), 4)}
-            for source, chunk, distance in results
-        ]
+        "answer": answer,
+        "retrieved_chunks": retrieved_chunks
     }
