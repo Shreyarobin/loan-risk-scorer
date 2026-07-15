@@ -4,6 +4,7 @@ import joblib
 import json
 import pandas as pd
 import numpy as np
+from transformers import pipeline, AutoTokenizer, AutoModelForTokenClassification
 
 app = FastAPI(title="Loan Risk Scorer")
 
@@ -18,6 +19,34 @@ with open("../../models/feature_schema.json") as f:
     schema = json.load(f)
 
 expected_columns = schema["columns"]
+
+# Load the fine-tuned NER model for document extraction
+ner_tokenizer = AutoTokenizer.from_pretrained("../../models/ner_model")
+ner_model = AutoModelForTokenClassification.from_pretrained("../../models/ner_model")
+document_ner = pipeline(
+    "ner",
+    model=ner_model,
+    tokenizer=ner_tokenizer,
+    aggregation_strategy="max"
+)
+
+
+def clean_entities(results, text, min_confidence=0.6):
+    cleaned = []
+    for r in sorted(results, key=lambda x: x["start"]):
+        if r["score"] < min_confidence:
+            continue
+        cleaned.append(r)
+
+    merged = []
+    for r in cleaned:
+        if merged and merged[-1]["entity_group"] == r["entity_group"] and r["start"] - merged[-1]["end"] <= 1:
+            merged[-1]["end"] = r["end"]
+            merged[-1]["word"] = text[merged[-1]["start"]:r["end"]]
+        else:
+            merged.append(dict(r))
+
+    return [{"type": m["entity_group"], "value": m["word"].strip(" .,")} for m in merged]
 
 
 class ApplicantRaw(BaseModel):
@@ -41,6 +70,10 @@ class ApplicantRaw(BaseModel):
     num_dependents: int
     telephone: str
     foreign_worker: str
+
+
+class DocumentText(BaseModel):
+    text: str
 
 
 @app.get("/")
@@ -90,3 +123,14 @@ def explain_applicant(applicant: ApplicantRaw):
 @app.get("/fairness-report")
 def get_fairness_report():
     return fairness_report
+
+
+@app.post("/applications/documents/extract")
+def extract_document_fields(document: DocumentText):
+    raw_results = document_ner(document.text)
+    extracted = clean_entities(raw_results, document.text)
+
+    return {
+        "original_text": document.text,
+        "extracted_fields": extracted
+    }
